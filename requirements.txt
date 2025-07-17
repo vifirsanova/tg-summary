@@ -1,0 +1,5 @@
+aiogram
+transformers
+torch
+tomli
+accelerate
