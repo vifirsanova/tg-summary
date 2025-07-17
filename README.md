@@ -2,7 +2,7 @@
 
 A Telegram bot that generates chat summaries using Google's Gemma-1.5b language model with 8-bit quantization.
 
-![Bot Demo](demo.gif) *(Example screenshot placeholder)*
+<img width="540" height="513" alt="image" src="https://github.com/user-attachments/assets/bc1d9a25-2e38-484b-9b1d-d704efc50786" />
 
 ## Features
 
