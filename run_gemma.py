@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from pathlib import Path
-import torch
-import re
 import tomli
-from datetime import datetime, timezone
-import os
+from pathlib import Path
+from typing import Optional
 import logging
+from groq import Groq
 
 # Configure logging
 logging.basicConfig(
@@ -16,100 +13,87 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class GemmaSummarizer:
-    """Corrected Gemma summarizer with proper model loading and error handling."""
+    """A streamlined Gemma summarizer following Groq API style."""
     
-    def __init__(self):
-        """Initialize with proper model type and CUDA settings."""
-        os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-        self._load_config()
-        self._load_prompts()
-        self._initialize_model()
+    def __init__(
+        self,
+        config_path: str = "config.toml",
+        system_prompt_path: str = "prompts/system_prompt.txt",
+        summary_prompt_path: str = "prompts/summary_prompt.txt"
+    ):
+        """Initialize the summarizer with configurable paths.
+        
+        Args:
+            config_path: Path to the TOML configuration file
+            system_prompt_path: Path to the system prompt file
+            summary_prompt_path: Path to the summary prompt file
+        """
+        self.config = self._load_config(config_path)
+        self.system_prompt = self._load_prompt_file(system_prompt_path)
+        self.summary_prompt = self._load_prompt_file(summary_prompt_path)
+        self.client = Groq(api_key=self.config["model"].get("api_key"))
 
-    def _load_config(self):
-        """Load model configuration from TOML."""
-        with open("config.toml", "rb") as f:
-            config = tomli.load(f)
-        self.model_name = config["model"]["name"]
-
-    def _load_prompts(self):
-        """Load prompts from text files."""
-        prompts_dir = Path("prompts")
-        self.system_prompt = (prompts_dir / "system_prompt.txt").read_text(encoding="utf-8").strip()
-        self.summary_prompt = (prompts_dir / "summary_prompt.txt").read_text(encoding="utf-8").strip()
-
-    def _initialize_model(self):
-        """Load model with correct class and improved error handling."""
+    def _load_config(self, config_path: str) -> dict:
+        """Load and validate configuration from TOML file."""
         try:
-            # Use AutoModelForCausalLM instead of specific class
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            with open(config_path, "rb") as f:
+                config = tomli.load(f)
             
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                quantization_config=BitsAndBytesConfig(load_in_8bit=True),
-                attn_implementation="sdpa"
-            ).eval()
-            
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is not available")
+            required_keys = {"name", "temperature", "max_tokens", "api_key"}
+            if not required_keys.issubset(config.get("model", {})):
+                raise ValueError(f"Config missing required keys: {required_keys}")
                 
-            logger.info(f"Model loaded on {self.model.device}")
+            return config
             
         except Exception as e:
-            logger.error(f"Model initialization failed: {e}")
+            logger.error(f"Failed to load config: {e}")
+            raise
+
+    def _load_prompt_file(self, path: str) -> str:
+        """Load a prompt from a text file."""
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.error(f"Failed to load prompt file {path}: {e}")
             raise
 
     def generate_summary(self, chat_history: str) -> str:
-        """Generate summary with proper error handling."""
+        """Generate a summary of the chat history using Groq API style.
+        
+        Args:
+            chat_history: The chat history to summarize
+            
+        Returns:
+            The generated summary text
+        """
         try:
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": self.summary_prompt.format(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    chat_history=chat_history
-                )}
-            ]
+            model_config = self.config["model"]
             
-            inputs = self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                truncation=True,
-                max_length=2048  # Added reasonable limit
-            ).to(self.model.device)
-
-            with torch.inference_mode():
-                outputs = self.model.generate(
-                    inputs,
-                    temperature=0.7,
-                    top_k=50,
-                    top_p=0.9,
-                    max_new_tokens=512,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-                )
-
-            full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            return self._clean_response(full_response)
+            # Prepare the user prompt with chat history
+            user_prompt = self.summary_prompt.format(
+                chat_history=chat_history
+            )
             
-        except RuntimeError as e:
+            # Make the API call in Groq style
+            response = self.client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                model=model_config["name"],
+                temperature=model_config.get("temperature", 0.7),
+                top_p=0.2,  # Added top_p parameter as per Groq example
+                max_tokens=model_config.get("max_tokens", 500)
+            )
+            
+            # Return just the content of the first choice
+            return response.choices[0].message.content
+            
+        except Exception as e:
             logger.error(f"Generation failed: {e}")
-            if "probability tensor" in str(e):
-                return "Error: Invalid probabilities in model output"
-            return "Error: Failed to generate summary"
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            return "Error: Unexpected error occurred"
-
-    def _clean_response(self, response: str) -> str:
-        """Extract the model's response with proper timestamp."""
-        try:
-            clean_response = response.split("assistant")[-1].strip()
-            return f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] {clean_response}"
-        except Exception as e:
-            logger.error(f"Response cleaning failed: {e}")
-            return "Error: Could not process response"
+            raise
+"""
+**Example usage**
 
 if __name__ == "__main__":
     try:
@@ -118,3 +102,4 @@ if __name__ == "__main__":
         print(summarizer.generate_summary(test_history))
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
+"""
