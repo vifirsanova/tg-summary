@@ -3,6 +3,8 @@ import tomli
 from pathlib import Path
 from typing import Optional
 import logging
+import json
+import sys
 from groq import Groq
 
 # Configure logging
@@ -21,13 +23,7 @@ class GemmaSummarizer:
         system_prompt_path: str = "prompts/system_prompt.txt",
         summary_prompt_path: str = "prompts/summary_prompt.txt"
     ):
-        """Initialize the summarizer with configurable paths.
-        
-        Args:
-            config_path: Path to the TOML configuration file
-            system_prompt_path: Path to the system prompt file
-            summary_prompt_path: Path to the summary prompt file
-        """
+        """Initialize the summarizer with configurable paths."""
         self.config = self._load_config(config_path)
         self.system_prompt = self._load_prompt_file(system_prompt_path)
         self.summary_prompt = self._load_prompt_file(summary_prompt_path)
@@ -57,24 +53,15 @@ class GemmaSummarizer:
             logger.error(f"Failed to load prompt file {path}: {e}")
             raise
 
-    def generate_summary(self, chat_history: str) -> str:
-        """Generate a summary of the chat history using Groq API style.
-        
-        Args:
-            chat_history: The chat history to summarize
-            
-        Returns:
-            The generated summary text
-        """
+    def generate_summary(self, chat_history: str, output_file: str) -> None:
+        """Generate and save summary of the chat history."""
         try:
             model_config = self.config["model"]
             
-            # Prepare the user prompt with chat history
             user_prompt = self.summary_prompt.format(
                 chat_history=chat_history
             )
             
-            # Make the API call in Groq style
             response = self.client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": self.system_prompt},
@@ -82,24 +69,38 @@ class GemmaSummarizer:
                 ],
                 model=model_config["name"],
                 temperature=model_config.get("temperature", 0.7),
-                top_p=0.2,  # Added top_p parameter as per Groq example
+                top_p=0.2,
                 max_tokens=model_config.get("max_tokens", 500)
             )
             
-            # Return just the content of the first choice
-            return response.choices[0].message.content
+            summary = response.choices[0].message.content
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(summary)
+            logger.info(f"Summary successfully saved to {output_file}")
             
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             raise
-"""
-**Example usage**
 
-if __name__ == "__main__":
+def main():
+    """Command line interface for the summarizer."""
+    if len(sys.argv) != 3:
+        print("Usage: python3 run_gemma.py <input_file> <output_file>")
+        sys.exit(1)
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
     try:
+        # Read the formatted chat history
+        with open(input_file, 'r', encoding='utf-8') as f:
+            chat_history = f.read()
+        
         summarizer = GemmaSummarizer()
-        test_history = "[2023-01-01 12:00] User1: Привет\n[2023-01-01 12:05] User2: Как дела?"
-        print(summarizer.generate_summary(test_history))
+        summarizer.generate_summary(chat_history, output_file)
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
-"""
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
